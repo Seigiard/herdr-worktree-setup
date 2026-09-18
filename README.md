@@ -14,7 +14,7 @@ tests, while the user's dotfiles own repository-specific policy.
 ## Install
 
 ```bash
-herdr plugin install Seigiard/herdr-worktree-setup --ref v0.1.0 -y
+herdr plugin install Seigiard/herdr-worktree-setup --ref v0.1.1 -y
 herdr plugin enable seigi.worktree-setup
 ```
 

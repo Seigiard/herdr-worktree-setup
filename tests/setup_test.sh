@@ -59,12 +59,20 @@ TOML
 }
 
 test_unconfigured_repository() {
-  local root="$WORK/unconfigured" main="$WORK/unconfigured/main" worktree="$WORK/unconfigured/feature" config="$WORK/unconfigured/config"
-  new_repository "$main" https://github.com/example/repository.git
-  mkdir -p "$config"
+  local root="$WORK/unconfigured" origin="$WORK/unconfigured/origin.git" main="$WORK/unconfigured/main" worktree="$WORK/unconfigured/feature" config="$WORK/unconfigured/config"
+  mkdir -p "$root" "$config"
+  git init --quiet --bare "$origin"
+  git -C "$origin" symbolic-ref HEAD refs/heads/main
+  new_repository "$main" "$origin"
+  git -C "$main" push --quiet -u origin main
   git -C "$main" worktree add --quiet -b feature "$worktree"
+  local old
+  old="$(git -C "$worktree" rev-parse HEAD)"
+  printf '%s\n' changed > "$main/tracked"
+  git -C "$main" commit --quiet -am changed
+  git -C "$main" push --quiet
   cat > "$config/config.toml" <<'TOML'
-[projects."github.com/another/repository"]
+[projects."other/repository"]
 fresh-base = true
 copy = [".env"]
 steps = ["touch setup-ran"]
@@ -73,6 +81,7 @@ TOML
   run_setup "$config" "$worktree" feature >/dev/null
   [[ ! -e "$worktree/setup-ran" ]] || fail 'unconfigured repository does not run setup steps'
   [[ ! -e "$worktree/.env" ]] || fail 'unconfigured repository does not copy policy files'
+  [[ $(git -C "$worktree" rev-parse HEAD) == "$old" ]] || fail 'unconfigured repository does not refresh fresh-base'
   [[ $(<"$(marker_path "$worktree")") == feature ]] || fail 'unconfigured repository still records lifecycle marker'
   pass 'unconfigured repositories receive no policy or fresh-base mutation'
 }

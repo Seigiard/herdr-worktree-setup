@@ -22,7 +22,7 @@ jobs:
       - name: Package plugin
         run: |
           archive="herdr-worktree-setup-${GITHUB_REF_NAME}.tar.gz"
-          tar -czf "$archive" README.md LICENSE herdr-plugin.toml setup.ts
+          bash tools/package-plugin.sh "$archive"
           sha256sum "$archive" > "$archive.sha256"
       - name: Publish release
         env:

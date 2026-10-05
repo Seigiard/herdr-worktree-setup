@@ -11,6 +11,21 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
+import {
+  array,
+  boolean,
+  fallback,
+  nonEmpty,
+  object,
+  optional,
+  parse,
+  pipe,
+  record,
+  safeParse,
+  string,
+  unknown,
+  type InferOutput,
+} from "./vendor/valibot/index.js";
 
 type CommandResult = {
   ok: boolean;
@@ -18,15 +33,24 @@ type CommandResult = {
   stderr: string;
 };
 
-type ProjectConfig = {
-  "fresh-base"?: boolean;
-  copy?: string[];
-  steps?: string[];
-};
+const worktreeEvent = object({
+  data: object({
+    worktree: object({
+      path: pipe(string(), nonEmpty()),
+      branch: fallback(string(), ""),
+    }),
+  }),
+});
 
-type Config = {
-  projects?: Record<string, ProjectConfig>;
-};
+const configuration = object({ projects: optional(record(string(), unknown())) });
+
+const projectConfiguration = object({
+  "fresh-base": fallback(boolean(), false),
+  copy: optional(array(string("copy must be an array of relative file paths"), "copy must be an array of relative file paths")),
+  steps: optional(array(pipe(string("steps must be an array of non-empty shell commands"), nonEmpty("steps must be an array of non-empty shell commands")), "steps must be an array of non-empty shell commands")),
+});
+
+type ProjectConfig = InferOutput<typeof projectConfiguration>;
 
 const TAG = "[worktree-setup]";
 
@@ -76,12 +100,12 @@ function recordGeneratedWorktree(worktree: string, branch: string): void {
   renameSync(temporary, marker.stdout);
 }
 
-function eventWorktree(): { path: string; branch: string } {
+function eventWorktree() {
   const raw = process.env.HERDR_PLUGIN_EVENT_JSON;
 
   if (!raw) throw new Error("HERDR_PLUGIN_EVENT_JSON is not set");
 
-  let event: unknown;
+  let event;
 
   try {
     event = JSON.parse(raw);
@@ -89,17 +113,13 @@ function eventWorktree(): { path: string; branch: string } {
     throw new Error(`invalid HERDR_PLUGIN_EVENT_JSON: ${String(error)}`);
   }
 
-  const worktree = (event as { data?: { worktree?: { path?: unknown; branch?: unknown } } }).data
-    ?.worktree;
+  const decoded = safeParse(worktreeEvent, event);
 
-  if (!worktree || typeof worktree.path !== "string" || !worktree.path) {
+  if (!decoded.success) {
     throw new Error("worktree.created event has no worktree path");
   }
 
-  return {
-    path: worktree.path,
-    branch: typeof worktree.branch === "string" ? worktree.branch : "",
-  };
+  return decoded.output.data.worktree;
 }
 
 function mainRepository(worktree: string): string {
@@ -137,14 +157,12 @@ function loadProject(key: string): ProjectConfig | undefined {
 
   if (!configDir) throw new Error("HERDR_PLUGIN_CONFIG_DIR is not set");
   const path = resolve(configDir, "config.toml");
-  const parsed = Bun.TOML.parse(readFileSync(path, "utf8")) as Config;
+  const parsed = parse(configuration, Bun.TOML.parse(readFileSync(path, "utf8")));
   const project = parsed.projects?.[key];
 
-  if (project && typeof project !== "object") {
-    throw new Error(`invalid project configuration for ${key}`);
-  }
+  if (!project) return undefined;
 
-  return project;
+  return parse(projectConfiguration, project);
 }
 
 function refreshFreshBranch(worktree: string, branch: string): void {
@@ -224,14 +242,23 @@ function safeRelativePath(value: string): boolean {
   );
 }
 
-function copyConfiguredFiles(mainRepo: string, worktree: string, files: unknown): void {
+function rejectDestinationSymlinks(worktree: string, file: string): void {
+  let current = resolve(worktree);
+
+  for (const part of file.split(sep)) {
+    current = resolve(current, part);
+    const stat = lstatSync(current, { throwIfNoEntry: false });
+
+    if (!stat) return;
+
+    if (stat.isSymbolicLink()) throw new Error(`copy destination is a symbolic link: ${file}`);
+  }
+}
+
+function copyConfiguredFiles(mainRepo: string, worktree: string, files: ProjectConfig["copy"]): void {
   if (files === undefined) return;
 
-  if (!Array.isArray(files) || files.some((file) => typeof file !== "string")) {
-    throw new Error("copy must be an array of relative file paths");
-  }
-
-  for (const file of files as string[]) {
+  for (const file of files) {
     if (!safeRelativePath(file)) throw new Error(`unsafe copy path: ${file}`);
     const source = resolve(mainRepo, file);
     const target = resolve(worktree, file);
@@ -240,7 +267,11 @@ function copyConfiguredFiles(mainRepo: string, worktree: string, files: unknown)
       throw new Error(`copy path escapes worktree: ${file}`);
     }
 
-    if (!existsSync(source) || existsSync(target)) continue;
+    if (!existsSync(source)) continue;
+
+    rejectDestinationSymlinks(worktree, file);
+
+    if (existsSync(target)) continue;
     const sourceStat = lstatSync(source);
 
     if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) {
@@ -253,12 +284,8 @@ function copyConfiguredFiles(mainRepo: string, worktree: string, files: unknown)
   }
 }
 
-function runSteps(worktree: string, mainRepo: string, branch: string, steps: unknown): void {
+function runSteps(worktree: string, mainRepo: string, branch: string, steps: ProjectConfig["steps"]): void {
   if (steps === undefined) return;
-
-  if (!Array.isArray(steps) || steps.some((step) => typeof step !== "string" || !step)) {
-    throw new Error("steps must be an array of non-empty shell commands");
-  }
 
   const env = {
     ...process.env,
@@ -267,7 +294,7 @@ function runSteps(worktree: string, mainRepo: string, branch: string, steps: unk
     HERDR_BRANCH: branch,
   };
 
-  for (const step of steps as string[]) {
+  for (const step of steps) {
     log(`$ ${step}`);
     const result = spawnSync("/bin/sh", ["-c", step], { cwd: worktree, env, stdio: "inherit" });
 

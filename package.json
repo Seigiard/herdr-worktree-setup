@@ -1,0 +1,13 @@
+{
+  "name": "herdr-worktree-setup-checks",
+  "private": true,
+  "scripts": {
+    "lint:anti-slop": "oxlint setup.ts tools/valibot-entry.ts",
+    "vendor:decoder": "bun build tools/valibot-entry.ts --target bun --minify --outfile vendor/valibot/index.js"
+  },
+  "devDependencies": {
+    "@oxlint/plugins": "1.87.0",
+    "oxlint": "1.87.0",
+    "valibot": "1.5.0"
+  }
+}

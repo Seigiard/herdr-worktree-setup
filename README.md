@@ -81,4 +81,21 @@ herdr plugin link "$PWD" --enabled
 
 The tests use real Git repositories and exercise the plugin through its event
 environment, including configured setup, fresh-base behavior, and the
-unconfigured-repository control.
+unconfigured-repository control. They also run the extracted release archive,
+without npm packages, and reject invalid event paths and malformed policy lists.
+
+The runtime decoder is a small vendored Valibot ESM bundle. Release archives
+include its license and provenance under `vendor/valibot/`. `npm ci` is only
+needed for development checks. To regenerate the bundle, run
+`npm run vendor:decoder` with the Bun version in `vendor/valibot/UPSTREAM.md`.
+
+Event paths must be non-empty strings. Missing or non-string event branches
+remain detached events. Only the selected project's configuration is decoded;
+invalid policies for other repositories do not affect setup. `copy` must be a
+string array, and `steps` must be an array of non-empty strings. Both lists are
+validated before fresh-base, copy, or step actions run. The lifecycle marker
+is still written before project policy is loaded.
+
+Copy destinations and their existing parent directories must not be symbolic
+links. This includes dangling links; copying must not follow them outside the
+new worktree.

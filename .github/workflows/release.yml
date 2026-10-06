@@ -13,11 +13,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
       - run: make lint
       - name: Package plugin
         run: |
           archive="herdr-worktree-setup-${GITHUB_REF_NAME}.tar.gz"
-          tar -czf "$archive" README.md LICENSE herdr-plugin.toml setup.ts
+          bash tools/package-plugin.sh "$archive"
           sha256sum "$archive" > "$archive.sha256"
       - name: Publish release
         env:

@@ -143,6 +143,31 @@ TOML
   pass 'failed setup steps record their exit code and stop the plugin'
 }
 
+test_signal_killed_step_records_setup_status() {
+  local main="$WORK/status-signal/main" worktree="$WORK/status-signal/feature" config="$WORK/status-signal/config"
+  new_repository "$main" git@github.com:membranehq/platform.git
+  mkdir -p "$config"
+  git -C "$main" worktree add --quiet -b feature "$worktree"
+  cat > "$config/config.toml" <<'TOML'
+[projects."github.com/membranehq/platform"]
+steps = ["kill -TERM $$"]
+TOML
+
+  local status output exit_code
+  status="$(setup_status_path "$worktree")"
+  if output="$(run_setup "$config" "$worktree" feature 2>&1)"; then
+    fail 'a signal-killed setup step must fail the plugin'
+  else
+    exit_code=$?
+  fi
+  [[ "$exit_code" == 1 ]] || fail 'a signal-killed setup step returns status 1'
+  [[ -f "$status" ]] || fail 'a signal-killed setup step records a final status file'
+  [[ $(wc -l < "$status") -eq 1 ]] || fail 'signal-killed setup status has exactly one line'
+  [[ $(<"$status") =~ ^done\ 143\ [0-9]+$ ]] || fail 'a SIGTERM-killed setup step records done 143'
+  [[ "$output" == *SIGTERM* ]] || fail 'a signal-killed setup step names SIGTERM in its error'
+  pass 'signal-killed setup steps record their signal exit code for agent hooks'
+}
+
 test_setup_exception_records_failure_status() {
   local main="$WORK/status-exception/main" worktree="$WORK/status-exception/feature" config="$WORK/status-exception/config"
   new_repository "$main" git@github.com:membranehq/platform.git
@@ -337,6 +362,7 @@ else
   test_running_setup_status
   test_successful_setup_records_final_status
   test_failed_step_records_setup_status
+  test_signal_killed_step_records_setup_status
   test_setup_exception_records_failure_status
   test_unconfigured_repository
   test_fresh_base

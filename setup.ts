@@ -33,6 +33,16 @@ type CommandResult = {
   stderr: string;
 };
 
+class SetupStepError extends Error {
+  constructor(
+    readonly exitCode: number,
+    step: string,
+  ) {
+    super(`setup step failed (${exitCode}): ${step}`);
+    this.name = "SetupStepError";
+  }
+}
+
 const worktreeEvent = object({
   data: object({
     worktree: object({
@@ -98,6 +108,28 @@ function recordGeneratedWorktree(worktree: string, branch: string): void {
   const temporary = `${marker.stdout}.tmp-${process.pid}`;
   writeFileSync(temporary, `${branch}\n`, { encoding: "utf8", mode: 0o600 });
   renameSync(temporary, marker.stdout);
+}
+
+function setupStatusPath(worktree: string): string {
+  const marker = git(
+    worktree,
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-path",
+    "herdr-worktree-setup",
+  );
+
+  if (!marker.ok || !marker.stdout) {
+    throw new Error(`cannot resolve setup status marker: ${marker.stderr}`);
+  }
+
+  return marker.stdout;
+}
+
+function recordSetupStatus(marker: string, status: string): void {
+  const temporary = `${marker}.tmp-${process.pid}`;
+  writeFileSync(temporary, `${status}\n`, { encoding: "utf8", mode: 0o600 });
+  renameSync(temporary, marker);
 }
 
 function eventWorktree() {
@@ -299,7 +331,7 @@ function runSteps(worktree: string, mainRepo: string, branch: string, steps: Pro
     const result = spawnSync("/bin/sh", ["-c", step], { cwd: worktree, env, stdio: "inherit" });
 
     if (result.error || result.status !== 0) {
-      throw new Error(`setup step failed (${result.status ?? "signal"}): ${step}`);
+      throw new SetupStepError(result.status ?? 1, step);
     }
   }
 }
@@ -317,9 +349,27 @@ function main(): void {
     return;
   }
 
-  if (project["fresh-base"] === true) refreshFreshBranch(worktree.path, worktree.branch);
-  copyConfiguredFiles(mainRepo, worktree.path, project.copy);
-  runSteps(worktree.path, mainRepo, worktree.branch, project.steps);
+  if (project.steps === undefined) {
+    if (project["fresh-base"] === true) refreshFreshBranch(worktree.path, worktree.branch);
+    copyConfiguredFiles(mainRepo, worktree.path, project.copy);
+
+    return;
+  }
+
+  const status = setupStatusPath(worktree.path);
+  const startedAt = Date.now();
+  recordSetupStatus(status, `running ${process.pid} ${startedAt}`);
+
+  try {
+    if (project["fresh-base"] === true) refreshFreshBranch(worktree.path, worktree.branch);
+    copyConfiguredFiles(mainRepo, worktree.path, project.copy);
+    runSteps(worktree.path, mainRepo, worktree.branch, project.steps);
+    recordSetupStatus(status, `done 0 ${Date.now()}`);
+  } catch (error) {
+    const exitCode = error instanceof SetupStepError ? error.exitCode : 1;
+    recordSetupStatus(status, `done ${exitCode} ${Date.now()}`);
+    throw error;
+  }
 }
 
 try {

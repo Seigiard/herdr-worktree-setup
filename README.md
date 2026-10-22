@@ -72,7 +72,12 @@ The file always contains one line. While setup is running, it says
 setup, it says `done <exit-code> <end-unix-ms>`. The marker is written
 atomically. A repository with no matching project table, or with a project
 table that has no `steps` key, gets no setup-status file; no file means that no
-setup is expected there.
+setup is expected there. A step's exit code is preserved. A signal-killed step
+writes `128 + signal number` (for example, `SIGTERM` writes `done 143`). Other
+failures that do not have a step exit code, such as fresh-base or copy
+exceptions and shell spawn errors, write `done 1`. Consumers must not treat a
+`running` line as active when its `<pid>` is no longer alive: that means setup
+was interrupted.
 
 ## Provenance Boundary
 

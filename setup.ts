@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
+import { constants as osConstants } from "node:os";
 import { spawnSync } from "node:child_process";
 import {
   array,
@@ -37,8 +38,9 @@ class SetupStepError extends Error {
   constructor(
     readonly exitCode: number,
     step: string,
+    detail?: string,
   ) {
-    super(`setup step failed (${exitCode}): ${step}`);
+    super(`setup step failed (${exitCode})${detail ? `: ${detail}` : ""}: ${step}`);
     this.name = "SetupStepError";
   }
 }
@@ -316,6 +318,14 @@ function copyConfiguredFiles(mainRepo: string, worktree: string, files: ProjectC
   }
 }
 
+function signalExitCode(signal: string | null): number {
+  if (!signal) return 1;
+
+  const number = osConstants.signals[signal];
+
+  return number === undefined ? 1 : 128 + number;
+}
+
 function runSteps(worktree: string, mainRepo: string, branch: string, steps: ProjectConfig["steps"]): void {
   if (steps === undefined) return;
 
@@ -330,8 +340,14 @@ function runSteps(worktree: string, mainRepo: string, branch: string, steps: Pro
     log(`$ ${step}`);
     const result = spawnSync("/bin/sh", ["-c", step], { cwd: worktree, env, stdio: "inherit" });
 
-    if (result.error || result.status !== 0) {
-      throw new SetupStepError(result.status ?? 1, step);
+    if (result.error) {
+      throw new SetupStepError(1, step, `could not spawn /bin/sh: ${result.error.message}`);
+    }
+
+    if (result.status !== 0) {
+      const detail = result.signal ? `terminated by ${result.signal}` : undefined;
+      const exitCode = result.signal ? signalExitCode(result.signal) : result.status ?? 1;
+      throw new SetupStepError(exitCode, step, detail);
     }
   }
 }

@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
+import { constants as osConstants } from "node:os";
 import { spawnSync } from "node:child_process";
 import {
   array,
@@ -32,6 +33,17 @@ type CommandResult = {
   stdout: string;
   stderr: string;
 };
+
+class SetupStepError extends Error {
+  constructor(
+    readonly exitCode: number,
+    step: string,
+    detail?: string,
+  ) {
+    super(`setup step failed (${exitCode})${detail ? `: ${detail}` : ""}: ${step}`);
+    this.name = "SetupStepError";
+  }
+}
 
 const worktreeEvent = object({
   data: object({
@@ -98,6 +110,28 @@ function recordGeneratedWorktree(worktree: string, branch: string): void {
   const temporary = `${marker.stdout}.tmp-${process.pid}`;
   writeFileSync(temporary, `${branch}\n`, { encoding: "utf8", mode: 0o600 });
   renameSync(temporary, marker.stdout);
+}
+
+function setupStatusPath(worktree: string): string {
+  const marker = git(
+    worktree,
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-path",
+    "herdr-worktree-setup",
+  );
+
+  if (!marker.ok || !marker.stdout) {
+    throw new Error(`cannot resolve setup status marker: ${marker.stderr}`);
+  }
+
+  return marker.stdout;
+}
+
+function recordSetupStatus(marker: string, status: string): void {
+  const temporary = `${marker}.tmp-${process.pid}`;
+  writeFileSync(temporary, `${status}\n`, { encoding: "utf8", mode: 0o600 });
+  renameSync(temporary, marker);
 }
 
 function eventWorktree() {
@@ -284,6 +318,14 @@ function copyConfiguredFiles(mainRepo: string, worktree: string, files: ProjectC
   }
 }
 
+function signalExitCode(signal: string | null): number {
+  if (!signal) return 1;
+
+  const number = osConstants.signals[signal];
+
+  return number === undefined ? 1 : 128 + number;
+}
+
 function runSteps(worktree: string, mainRepo: string, branch: string, steps: ProjectConfig["steps"]): void {
   if (steps === undefined) return;
 
@@ -298,8 +340,14 @@ function runSteps(worktree: string, mainRepo: string, branch: string, steps: Pro
     log(`$ ${step}`);
     const result = spawnSync("/bin/sh", ["-c", step], { cwd: worktree, env, stdio: "inherit" });
 
-    if (result.error || result.status !== 0) {
-      throw new Error(`setup step failed (${result.status ?? "signal"}): ${step}`);
+    if (result.error) {
+      throw new SetupStepError(1, step, `could not spawn /bin/sh: ${result.error.message}`);
+    }
+
+    if (result.status !== 0) {
+      const detail = result.signal ? `terminated by ${result.signal}` : undefined;
+      const exitCode = result.signal ? signalExitCode(result.signal) : result.status ?? 1;
+      throw new SetupStepError(exitCode, step, detail);
     }
   }
 }
@@ -317,9 +365,27 @@ function main(): void {
     return;
   }
 
-  if (project["fresh-base"] === true) refreshFreshBranch(worktree.path, worktree.branch);
-  copyConfiguredFiles(mainRepo, worktree.path, project.copy);
-  runSteps(worktree.path, mainRepo, worktree.branch, project.steps);
+  if (project.steps === undefined) {
+    if (project["fresh-base"] === true) refreshFreshBranch(worktree.path, worktree.branch);
+    copyConfiguredFiles(mainRepo, worktree.path, project.copy);
+
+    return;
+  }
+
+  const status = setupStatusPath(worktree.path);
+  const startedAt = Date.now();
+  recordSetupStatus(status, `running ${process.pid} ${startedAt}`);
+
+  try {
+    if (project["fresh-base"] === true) refreshFreshBranch(worktree.path, worktree.branch);
+    copyConfiguredFiles(mainRepo, worktree.path, project.copy);
+    runSteps(worktree.path, mainRepo, worktree.branch, project.steps);
+    recordSetupStatus(status, `done 0 ${Date.now()}`);
+  } catch (error) {
+    const exitCode = error instanceof SetupStepError ? error.exitCode : 1;
+    recordSetupStatus(status, `done ${exitCode} ${Date.now()}`);
+    throw error;
+  }
 }
 
 try {

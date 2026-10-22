@@ -60,6 +60,25 @@ generated `worktree/*` branch. Later lines may carry attribution for mutations
 already made. The marker is written atomically and Git removes it with the
 linked worktree metadata.
 
+For a configured project with a `steps` key, the handler writes a setup-status
+marker for the `my-mac-setup` `agent-hooks` consumers at:
+
+```text
+git rev-parse --path-format=absolute --git-path herdr-worktree-setup
+```
+
+The file always contains one line. While setup is running, it says
+`running <pid> <start-unix-ms>`, where `<pid>` is the setup process. After
+setup, it says `done <exit-code> <end-unix-ms>`. The marker is written
+atomically. A repository with no matching project table, or with a project
+table that has no `steps` key, gets no setup-status file; no file means that no
+setup is expected there. A step's exit code is preserved. A signal-killed step
+writes `128 + signal number` (for example, `SIGTERM` writes `done 143`). Other
+failures that do not have a step exit code, such as fresh-base or copy
+exceptions and shell spawn errors, write `done 1`. Consumers must not treat a
+`running` line as active when its `<pid>` is no longer alive: that means setup
+was interrupted.
+
 ## Provenance Boundary
 
 The plugin observes Herdr's `worktree.created` event after native worktree

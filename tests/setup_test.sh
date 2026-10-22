@@ -32,6 +32,10 @@ marker_path() {
   git -C "$1" rev-parse --path-format=absolute --git-path herdr-generated-worktree
 }
 
+setup_status_path() {
+  git -C "$1" rev-parse --path-format=absolute --git-path herdr-worktree-setup
+}
+
 run_setup() {
   local config="$1" worktree="$2" branch="$3"
   HERDR_PLUGIN_CONFIG_DIR="$config" \
@@ -56,6 +60,139 @@ TOML
   [[ $(<"$worktree/setup-ran") == feature ]] || fail 'configured setup exports branch to steps'
   [[ $(<"$(marker_path "$worktree")") == feature ]] || fail 'configured setup records generated marker'
   pass 'configured setup copies files, runs steps, and records the marker'
+}
+
+test_running_setup_status() {
+  local main="$WORK/status-lifecycle/main" worktree="$WORK/status-lifecycle/feature" config="$WORK/status-lifecycle/config"
+  new_repository "$main" git@github.com:membranehq/platform.git
+  mkdir -p "$config"
+  git -C "$main" worktree add --quiet -b feature "$worktree"
+  cat > "$config/config.toml" <<'TOML'
+[projects."github.com/membranehq/platform"]
+steps = ["status=$(git rev-parse --path-format=absolute --git-path herdr-worktree-setup); if [ -f \"$status\" ]; then cat \"$status\" > setup-status-during; else : > setup-status-missing; fi; printf '%s\\n' \"$PPID\" > setup-shell-parent"]
+TOML
+
+  local before after running_line shell_parent running_pid running_time
+  before="$(bun -e 'console.log(Date.now())')"
+  run_setup "$config" "$worktree" feature >/dev/null
+  after="$(bun -e 'console.log(Date.now())')"
+
+  [[ ! -e "$worktree/setup-status-missing" ]] || fail 'configured step reads the running setup status file'
+  [[ -f "$worktree/setup-status-during" ]] || fail 'configured step records the running setup status file'
+  [[ $(wc -l < "$worktree/setup-status-during") -eq 1 ]] || fail 'running setup status has exactly one line'
+  running_line="$(<"$worktree/setup-status-during")"
+  [[ "$running_line" =~ ^running\ ([0-9]+)\ ([0-9]+)$ ]] || fail 'running setup status has the consumer format'
+  running_pid="${BASH_REMATCH[1]}"
+  running_time="${BASH_REMATCH[2]}"
+  shell_parent="$(<"$worktree/setup-shell-parent")"
+  [[ "$running_pid" == "$shell_parent" ]] || fail 'running setup status identifies the setup process'
+  (( running_time >= before && running_time <= after )) || fail 'running setup status timestamp is within the setup window'
+
+  pass 'configured setup records running status for agent hooks'
+}
+
+test_successful_setup_records_final_status() {
+  local main="$WORK/status-success/main" worktree="$WORK/status-success/feature" config="$WORK/status-success/config"
+  new_repository "$main" git@github.com:membranehq/platform.git
+  mkdir -p "$config"
+  git -C "$main" worktree add --quiet -b feature "$worktree"
+  cat > "$config/config.toml" <<'TOML'
+[projects."github.com/membranehq/platform"]
+steps = ["bun -e 'console.log(Date.now())' > setup-step-start"]
+TOML
+
+  local status after start_time done_line done_time
+  status="$(setup_status_path "$worktree")"
+  run_setup "$config" "$worktree" feature >/dev/null
+  after="$(bun -e 'console.log(Date.now())')"
+
+  [[ -f "$worktree/setup-step-start" ]] || fail 'successful setup completes its configured step'
+  start_time="$(<"$worktree/setup-step-start")"
+  [[ "$start_time" =~ ^[0-9]+$ ]] || fail 'successful setup step records its wall-clock start'
+  [[ -f "$status" ]] || fail 'successful setup records a final status file'
+  [[ $(wc -l < "$status") -eq 1 ]] || fail 'final setup status has exactly one line'
+  done_line="$(<"$status")"
+  [[ "$done_line" =~ ^done\ 0\ ([0-9]+)$ ]] || fail 'successful setup records done 0'
+  done_time="${BASH_REMATCH[1]}"
+  (( done_time >= start_time && done_time <= after )) || fail 'final setup status timestamp follows the completed step'
+  pass 'successful setup records final status for agent hooks'
+}
+
+test_failed_step_records_setup_status() {
+  local main="$WORK/status-failure/main" worktree="$WORK/status-failure/feature" config="$WORK/status-failure/config"
+  new_repository "$main" git@github.com:membranehq/platform.git
+  mkdir -p "$config"
+  git -C "$main" worktree add --quiet -b feature "$worktree"
+  cat > "$config/config.toml" <<'TOML'
+[projects."github.com/membranehq/platform"]
+steps = ["exit 7", "touch later-step"]
+TOML
+
+  local status exit_code
+  status="$(setup_status_path "$worktree")"
+  if run_setup "$config" "$worktree" feature >/dev/null 2>&1; then
+    fail 'a failed setup step must fail the plugin'
+  else
+    exit_code=$?
+  fi
+  [[ "$exit_code" == 1 ]] || fail 'a failed setup step returns status 1'
+  [[ -f "$status" ]] || fail 'a failed setup step records a final status file'
+  [[ $(wc -l < "$status") -eq 1 ]] || fail 'failed setup status has exactly one line'
+  [[ $(<"$status") =~ ^done\ 7\ [0-9]+$ ]] || fail 'a failed setup step records done 7'
+  [[ ! -e "$worktree/later-step" ]] || fail 'a failed setup step prevents later steps'
+  pass 'failed setup steps record their exit code and stop the plugin'
+}
+
+test_signal_killed_step_records_setup_status() {
+  local main="$WORK/status-signal/main" worktree="$WORK/status-signal/feature" config="$WORK/status-signal/config"
+  new_repository "$main" git@github.com:membranehq/platform.git
+  mkdir -p "$config"
+  git -C "$main" worktree add --quiet -b feature "$worktree"
+  cat > "$config/config.toml" <<'TOML'
+[projects."github.com/membranehq/platform"]
+steps = ["kill -TERM $$"]
+TOML
+
+  local status output exit_code
+  status="$(setup_status_path "$worktree")"
+  if output="$(run_setup "$config" "$worktree" feature 2>&1)"; then
+    fail 'a signal-killed setup step must fail the plugin'
+  else
+    exit_code=$?
+  fi
+  [[ "$exit_code" == 1 ]] || fail 'a signal-killed setup step returns status 1'
+  [[ -f "$status" ]] || fail 'a signal-killed setup step records a final status file'
+  [[ $(wc -l < "$status") -eq 1 ]] || fail 'signal-killed setup status has exactly one line'
+  [[ $(<"$status") =~ ^done\ 143\ [0-9]+$ ]] || fail 'a SIGTERM-killed setup step records done 143'
+  [[ "$output" == *SIGTERM* ]] || fail 'a signal-killed setup step names SIGTERM in its error'
+  pass 'signal-killed setup steps record their signal exit code for agent hooks'
+}
+
+test_setup_exception_records_failure_status() {
+  local main="$WORK/status-exception/main" worktree="$WORK/status-exception/feature" config="$WORK/status-exception/config"
+  new_repository "$main" git@github.com:membranehq/platform.git
+  mkdir -p "$config"
+  git -C "$main" worktree add --quiet -b feature "$worktree"
+  ln -s "$WORK/status-exception/outside" "$worktree/.env"
+  cat > "$config/config.toml" <<'TOML'
+[projects."github.com/membranehq/platform"]
+copy = [".env"]
+steps = ["touch step-must-not-run"]
+TOML
+
+  local status exit_code
+  status="$(setup_status_path "$worktree")"
+  if run_setup "$config" "$worktree" feature >/dev/null 2>&1; then
+    fail 'a setup exception must fail the plugin'
+  else
+    exit_code=$?
+  fi
+  [[ "$exit_code" == 1 ]] || fail 'a setup exception returns status 1'
+  [[ -f "$status" ]] || fail 'a setup exception records a final status file'
+  [[ $(wc -l < "$status") -eq 1 ]] || fail 'exception setup status has exactly one line'
+  [[ $(<"$status") =~ ^done\ 1\ [0-9]+$ ]] || fail 'a setup exception records done 1'
+  [[ ! -e "$worktree/step-must-not-run" ]] || fail 'a setup exception prevents configured steps'
+  pass 'setup exceptions after startup record done 1 for agent hooks'
 }
 
 test_unconfigured_repository() {
@@ -87,6 +224,7 @@ TOML
   [[ ! -e "$worktree/.env" ]] || fail 'unconfigured repository does not copy policy files'
   [[ $(git -C "$worktree" rev-parse HEAD) == "$old" ]] || fail 'unconfigured repository does not refresh fresh-base'
   [[ $(<"$(marker_path "$worktree")") == feature ]] || fail 'unconfigured repository still records lifecycle marker'
+  [[ ! -e "$(setup_status_path "$worktree")" ]] || fail 'unconfigured repository has no setup status file'
   pass 'unconfigured repositories receive no policy or fresh-base mutation'
 }
 
@@ -114,6 +252,7 @@ TOML
 
   run_setup "$config" "$worktree" feature >/dev/null
   [[ $(git -C "$worktree" rev-parse HEAD) == "$expected" ]] || fail 'fresh-base resets an eligible new branch'
+  [[ ! -e "$(setup_status_path "$worktree")" ]] || fail 'a project without steps has no setup status file'
   run_setup "$config" "$dirty" dirty >/dev/null
   [[ $(git -C "$dirty" rev-parse HEAD) == "$old" ]] || fail 'fresh-base preserves a dirty worktree'
   pass 'fresh-base resets only eligible untouched branches'
@@ -214,10 +353,21 @@ test_detached_event() {
   pass 'missing and non-string branches remain detached events'
 }
 
-test_configured_setup
-test_unconfigured_repository
-test_fresh_base
-test_copy_destination_symlinks
-test_invalid_policy
-test_invalid_events
-test_detached_event
+if (( $# > 0 )); then
+  for test_name in "$@"; do
+    "$test_name"
+  done
+else
+  test_configured_setup
+  test_running_setup_status
+  test_successful_setup_records_final_status
+  test_failed_step_records_setup_status
+  test_signal_killed_step_records_setup_status
+  test_setup_exception_records_failure_status
+  test_unconfigured_repository
+  test_fresh_base
+  test_copy_destination_symlinks
+  test_invalid_policy
+  test_invalid_events
+  test_detached_event
+fi
